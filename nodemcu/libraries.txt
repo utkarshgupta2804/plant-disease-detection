@@ -1,0 +1,7 @@
+# NodeMCU v3 ESP8266 — Arduino Library Dependencies
+# Board URL: https://arduino.esp8266.com/stable/package_esp8266com_index.json
+# Board: NodeMCU 1.0 (ESP-12E Module) | Upload: 115200 | CPU: 80MHz
+
+ArduinoJson       @ 6.x    # JSON parse/serialize (Benoit Blanchon)
+Adafruit_SSD1306  @ 2.x    # OLED driver (I2C, addr 0x3C, D1=SCL, D2=SDA)
+Adafruit_GFX      @ 1.x    # GFX core (dependency of SSD1306)

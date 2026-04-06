@@ -1,0 +1,38 @@
+# LilyGo T-Display S3 AMOLED — Arduino Library Dependencies
+# Install all via Arduino IDE → Tools → Manage Libraries
+
+# Board support (add in Arduino IDE → File → Preferences → Additional Board URLs):
+# https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+# Then: Tools → Board → Boards Manager → search "esp32" → install Espressif Systems esp32
+
+# Board settings in Arduino IDE:
+#   Board         : LilyGo T-Display S3  (or "ESP32S3 Dev Module" if not listed)
+#   PSRAM         : OPI PSRAM
+#   Flash Size    : 16MB
+#   Partition     : 16M Flash (3MB APP/9.9MB FATFS)
+#   Upload Speed  : 921600
+#   Port          : /dev/ttyACM0 or /dev/ttyUSB1 (whichever appears when plugged in)
+
+# Required libraries:
+LilyGo-AMOLED-Series   # Display + LVGL wrapper for RM67162
+                        # GitHub: Xinyuan-LilyGO/LilyGo-AMOLED-Series
+                        # Install: Arduino IDE → Manage Libraries → search "LilyGo AMOLED"
+                        # OR: clone into ~/Arduino/libraries/
+
+ArduinoJson            @ 6.x    # JSON parsing  (Benoit Blanchon)
+                                 # Arduino IDE → Manage Libraries → "ArduinoJson"
+
+# LVGL is bundled inside LilyGo-AMOLED-Series — do NOT install separately.
+
+# PlatformIO alternative (platformio.ini):
+# [env:lilygo-t-display-s3]
+# platform = espressif32
+# board = esp32-s3-devkitc-1
+# framework = arduino
+# board_build.arduino.memory_type = qio_opi
+# lib_deps =
+#     bblanchon/ArduinoJson@^6.21.3
+#     https://github.com/Xinyuan-LilyGO/LilyGo-AMOLED-Series.git
+# build_flags =
+#     -DBOARD_HAS_PSRAM
+#     -mfix-esp32-psram-cache-issue
