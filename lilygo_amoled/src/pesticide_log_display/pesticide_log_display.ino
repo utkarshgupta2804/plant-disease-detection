@@ -1,414 +1,359 @@
 // =============================================================================
-// pesticide_log_display.ino — LilyGo T-Display S3 AMOLED Log Viewer
-// Team OJAS · NIT Hamirpur · Dept. of Electrical Engineering
+// pesticide_log_display.ino  v3.0
+// Team OJAS · NIT Hamirpur · Intelligent Pesticide System
 // Faculty: Dr. Katam Nishanth
 //
-// FIX APPLIED:
-//   LV_Helper_v9.cpp clashes with newer LVGL v9 because both define
-//   lv_tick_get_cb() with incompatible signatures.
-//   Resolution: Do NOT call beginLvglHelper().
-//   Instead, initialise LVGL manually here using my_tick_get_cb()
-//   (a private millis() wrapper that never conflicts with LVGL headers).
+// APPROACH: TFT_eSPI Sprite (framebuffer) → amoled.pushColors()
+//   • Zero LVGL — eliminates ALL color format / byte-swap issues
+//   • TFT_eSPI draws into PSRAM sprite, pushColors sends it to RM67162
+//   • This is the exact pattern from official LilyGo TFT_eSPI_Sprite example
 //
-// Hardware:
-//   MCU      : ESP32-S3R8  (8 MB PSRAM, 16 MB Flash)
-//   Display  : RM67162 AMOLED  536×240 px
-//   Link     : USB-C → RPi /dev/ttyUSB1  @  115200 baud
+// Required libs  (install via Arduino Library Manager):
+//   • LilyGo-AMOLED-Series  (latest)
+//   • TFT_eSPI               (bundled in LilyGo libdeps — use THAT copy)
+//   • ArduinoJson 6.x
 //
-// Board settings (Arduino IDE):
+// Board settings:
 //   Board   : ESP32S3 Dev Module
-//   PSRAM   : OPI PSRAM   ← required
-//   Flash   : 16 MB
-//   Libs    : LilyGo-AMOLED-Series  |  ArduinoJson 6.x  |  lvgl v9
-//
-// Font sizes used (enable in lv_conf.h):
-//   LV_FONT_MONTSERRAT_14  1
-//   LV_FONT_MONTSERRAT_16  1
-//   LV_FONT_MONTSERRAT_20  1
+//   PSRAM   : OPI PSRAM  ← REQUIRED
+//   Flash   : 16 MB (128Mb)
+//   USB CDC on Boot: Enabled
 // =============================================================================
 
 #include <Arduino.h>
 #include <LilyGo_AMOLED.h>
-#include <LV_Helper.h>        // pulls in lvgl.h — we do NOT call beginLvglHelper()
+#include <TFT_eSPI.h>
 #include <ArduinoJson.h>
 
-// ─── Display ──────────────────────────────────────────────────────────────────
-LilyGo_Class amoled;
+// ─── Hardware ─────────────────────────────────────────────────────────────────
+LilyGo_Class  amoled;
+TFT_eSPI       tft   = TFT_eSPI();
+TFT_eSprite    spr   = TFT_eSprite(&tft);   // full-screen PSRAM framebuffer
 
-#define SCREEN_W  536
-#define SCREEN_H  240
+#define W  536
+#define H  240
 
-// ─── Serial ───────────────────────────────────────────────────────────────────
-#define LOG_BAUD  115200
+// ─── Layout constants ─────────────────────────────────────────────────────────
+#define BAR_H       74    // top status bar height
+#define LOG_Y       (BAR_H + 1)
+#define LOG_LINE_H  21    // pixel height per log row  (fits font size 2)
+#define MAX_LOGS    ((H - LOG_Y) / LOG_LINE_H)   // = 7
 
-// ─── Layout ───────────────────────────────────────────────────────────────────
-#define STATUS_BAR_H   58                                          // ↑ was 44
-#define LOG_AREA_TOP   (STATUS_BAR_H + 2)
-#define LOG_FONT_H     18                                          // ↑ was 14
-#define MAX_LOG_LINES  ((SCREEN_H - LOG_AREA_TOP) / LOG_FONT_H)   // ≈10
+// ─── Colour palette (RGB565) ──────────────────────────────────────────────────
+// Use TFT_eSPI's colour macro:  tft.color565(r,g,b)
+// Pre-computed here for speed:
+#define C_BLACK      0x0000
+#define C_BG         0x0882   // #0D1208 → near-black green
+#define C_SURFACE    0x1129   // #122116 → dark green surface
+#define C_BORDER     0x1CA3   // #1A3A1A
+#define C_GREEN_BR   0x57E8   // #50E048  bright green (pump on / ready)
+#define C_GREEN_MID  0x4DC3   // #4DB828  mid green
+#define C_GREEN_DIM  0x2582   // #244810  dim green text
+#define C_AMBER_BR   0xFDC0   // #FDB800
+#define C_AMBER_DIM  0x8480   // #844000
+#define C_RED_BR     0xF820   // #FF0400
+#define C_RED_MID    0xE040   // #E00800
+#define C_TEAL       0x07D5   // #00FAA8
+#define C_WHITE      0xFFFF
+#define C_LGREY      0x8C51   // #8C8A88
+#define C_DGREY      0x2965   // #294CA8  — not used, kept for reference
 
-// ─── Colour palette ───────────────────────────────────────────────────────────
-#define C_BG         lv_color_hex(0x0D1208)
-#define C_SURFACE    lv_color_hex(0x1C2514)
-#define C_GREEN      lv_color_hex(0x7DB547)
-#define C_GREEN2     lv_color_hex(0xA3D15E)
-#define C_AMBER      lv_color_hex(0xD4A017)
-#define C_AMBER2     lv_color_hex(0xF0BE3A)
-#define C_RED        lv_color_hex(0xC94040)
-#define C_RED2       lv_color_hex(0xE86060)
-#define C_TEAL       lv_color_hex(0x3CB4A0)
-#define C_TEXT       lv_color_hex(0xDDE8CC)
-#define C_TEXT2      lv_color_hex(0x8FA878)
-#define C_TEXT3      lv_color_hex(0x5A6E48)
-#define C_BORDER     lv_color_hex(0x3A4A2A)
-
-// ─── LVGL objects ─────────────────────────────────────────────────────────────
-static lv_obj_t *scr;
-static lv_obj_t *lbl_disease, *lbl_severity, *lbl_time;
-static lv_obj_t *lbl_temp, *lbl_humidity, *lbl_tank, *lbl_conc;
-static lv_obj_t *dot_pa, *dot_pb, *dot_main;
-static lv_obj_t *log_panel;
-static lv_obj_t *log_labels[20];
+// Severity badge colours
+struct SevColors { uint16_t bg, border, text; };
+SevColors sevNone     = {0x0100, 0x0D00, 0x3DE0};  // dark-green bg, green text
+SevColors sevMild     = {0x2100, 0x4200, 0xFDC0};  // dark-amber bg, amber text
+SevColors sevModerate = {0x3100, 0x6200, 0xFCA0};
+SevColors sevSevere   = {0x4000, 0x8000, 0xF820};  // dark-red bg, red text
 
 // ─── State ────────────────────────────────────────────────────────────────────
-struct Status {
-  String disease   = "—";
-  String severity  = "none";
-  int    pump_a    = 0;
-  int    pump_b    = 0;
-  int    main_pump = 0;
-  float  temp      = -99;
-  float  humidity  = -99;
-  float  tank      = -99;
-  float  conc      = -99;
-} status;
+struct SystemStatus {
+    String  disease   = "Awaiting RPi...";
+    String  severity  = "none";
+    bool    pump_a    = false;
+    bool    pump_b    = false;
+    bool    main_pump = false;
+    float   temp      = -99;
+    float   humidity  = -99;
+    float   tank      = -99;
+    float   conc      = -99;
+} sys;
 
-String   serialBuf = "";
-uint32_t uptime_s  = 0;
+// Circular log ring buffer
+#define LOG_BUF  48
+struct LogLine { String text; uint16_t color; };
+LogLine  logRing[LOG_BUF];
+int      logHead  = 0;
+int      logCount = 0;
 
-// ─── LVGL display flush callback ──────────────────────────────────────────────
-static lv_display_t *lvDisplay = nullptr;
-
-static void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
-{
-    uint32_t w = (area->x2 - area->x1 + 1);
-    uint32_t h = (area->y2 - area->y1 + 1);
-    amoled.pushColors(area->x1, area->y1, w, h, (uint16_t *)px_map);
-    lv_display_flush_ready(disp);
-}
-
-// ─── PRIVATE tick source ──────────────────────────────────────────────────────
-static uint32_t my_tick_get_cb(void)
-{
-    return (uint32_t)millis();
-}
-
-// ─── Manual LVGL init ────────────────────────────────────────────────────────
-#define DRAW_BUF_LINES  20
-static lv_color_t *drawBuf1 = nullptr;
-static lv_color_t *drawBuf2 = nullptr;
-
-void initLvgl()
-{
-    drawBuf1 = (lv_color_t *)ps_malloc(SCREEN_W * DRAW_BUF_LINES * sizeof(lv_color_t));
-    drawBuf2 = (lv_color_t *)ps_malloc(SCREEN_W * DRAW_BUF_LINES * sizeof(lv_color_t));
-    assert(drawBuf1 && drawBuf2);
-
-    lv_init();
-    lv_tick_set_cb(my_tick_get_cb);
-
-    lvDisplay = lv_display_create(SCREEN_W, SCREEN_H);
-    lv_display_set_color_format(lvDisplay, LV_COLOR_FORMAT_RGB565);
-    lv_display_set_flush_cb(lvDisplay, my_disp_flush);
-    lv_display_set_buffers(lvDisplay,
-                           drawBuf1, drawBuf2,
-                           SCREEN_W * DRAW_BUF_LINES * sizeof(lv_color_t),
-                           LV_DISPLAY_RENDER_MODE_PARTIAL);
-}
+String   rxBuf   = "";
+uint32_t uptimeSec = 0;
+bool     needsRedraw = true;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-lv_color_t severityColor(const String &sev)
-{
-    if (sev == "severe")   return C_RED2;
-    if (sev == "moderate") return C_AMBER2;
-    if (sev == "mild")     return C_AMBER;
-    return C_GREEN2;
+String fmtF(float v, int d = 1) {
+    if (v < -90) return "---";
+    char b[12]; snprintf(b, sizeof(b), "%.*f", d, v); return b;
+}
+String fmtUptime(uint32_t s) {
+    char b[12];
+    snprintf(b, sizeof(b), "%02lu:%02lu:%02lu",
+             s/3600, (s%3600)/60, s%60);
+    return b;
+}
+SevColors pickSev() {
+    if (sys.severity == "severe")   return sevSevere;
+    if (sys.severity == "moderate") return sevModerate;
+    if (sys.severity == "mild")     return sevMild;
+    return sevNone;
+}
+String sevLabel() {
+    String s = sys.severity; s.toUpperCase(); return s;
 }
 
-String fmtFloat(float v, int dec = 1)
-{
-    if (v < -90) return "—";
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%.*f", dec, v);
-    return String(buf);
+// ─── Log functions ────────────────────────────────────────────────────────────
+void pushLog(const String &txt, uint16_t col) {
+    logRing[logHead] = {txt, col};
+    logHead = (logHead + 1) % LOG_BUF;
+    if (logCount < LOG_BUF) logCount++;
+    needsRedraw = true;
 }
 
-// ─── UI Builder ───────────────────────────────────────────────────────────────
-void buildUI()
+// ─── Draw routines ────────────────────────────────────────────────────────────
+
+// Draw a filled rounded-rect badge with centred text
+void drawBadge(int x, int y, int w, int h, int r,
+               uint16_t bg, uint16_t border, uint16_t fg,
+               const String &label, uint8_t fontSz)
 {
-    scr = lv_scr_act();
-    lv_obj_set_style_bg_color(scr, C_BG, 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-
-    // ── Status bar ─────────────────────────────────────────────────────────
-    lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_set_size(bar, SCREEN_W, STATUS_BAR_H);
-    lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_set_style_bg_color(bar, C_SURFACE, 0);
-    lv_obj_set_style_border_color(bar, C_BORDER, 0);
-    lv_obj_set_style_border_width(bar, 1, 0);
-    lv_obj_set_style_radius(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 4, 0);
-    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-
-    // Row 1 ── disease / severity / uptime
-    lbl_disease = lv_label_create(bar);
-    lv_obj_set_style_text_font(lbl_disease, &lv_font_montserrat_20, 0);   // ↑ was 14
-    lv_obj_set_style_text_color(lbl_disease, C_TEXT, 0);
-    lv_obj_align(lbl_disease, LV_ALIGN_TOP_LEFT, 2, 0);
-    lv_label_set_text(lbl_disease, "Disease: —");
-
-    lbl_severity = lv_label_create(bar);
-    lv_obj_set_style_text_font(lbl_severity, &lv_font_montserrat_16, 0);  // ↑ was 12
-    lv_obj_set_style_text_color(lbl_severity, C_GREEN2, 0);
-    lv_obj_align(lbl_severity, LV_ALIGN_TOP_LEFT, 240, 2);
-    lv_label_set_text(lbl_severity, "[none]");
-
-    lbl_time = lv_label_create(bar);
-    lv_obj_set_style_text_font(lbl_time, &lv_font_montserrat_16, 0);      // ↑ was 12
-    lv_obj_set_style_text_color(lbl_time, C_TEXT3, 0);
-    lv_obj_align(lbl_time, LV_ALIGN_TOP_RIGHT, -2, 2);
-    lv_label_set_text(lbl_time, "00:00:00");
-
-    // Row 2 ── sensor values
-    lbl_temp = lv_label_create(bar);
-    lv_obj_set_style_text_font(lbl_temp, &lv_font_montserrat_16, 0);      // ↑ was 12
-    lv_obj_set_style_text_color(lbl_temp, C_AMBER2, 0);
-    lv_obj_align(lbl_temp, LV_ALIGN_BOTTOM_LEFT, 2, -2);
-    lv_label_set_text(lbl_temp, "T:—°C");
-
-    lbl_humidity = lv_label_create(bar);
-    lv_obj_set_style_text_font(lbl_humidity, &lv_font_montserrat_16, 0);  // ↑ was 12
-    lv_obj_set_style_text_color(lbl_humidity, C_TEAL, 0);
-    lv_obj_align(lbl_humidity, LV_ALIGN_BOTTOM_LEFT, 90, -2);             // ↑ x offset was 65
-    lv_label_set_text(lbl_humidity, "H:—%");
-
-    lbl_tank = lv_label_create(bar);
-    lv_obj_set_style_text_font(lbl_tank, &lv_font_montserrat_16, 0);      // ↑ was 12
-    lv_obj_set_style_text_color(lbl_tank, C_TEXT2, 0);
-    lv_obj_align(lbl_tank, LV_ALIGN_BOTTOM_LEFT, 175, -2);                // ↑ x offset was 120
-    lv_label_set_text(lbl_tank, "Tank:—%");
-
-    lbl_conc = lv_label_create(bar);
-    lv_obj_set_style_text_font(lbl_conc, &lv_font_montserrat_16, 0);      // ↑ was 12
-    lv_obj_set_style_text_color(lbl_conc, C_TEXT2, 0);
-    lv_obj_align(lbl_conc, LV_ALIGN_BOTTOM_LEFT, 290, -2);                // ↑ x offset was 195
-    lv_label_set_text(lbl_conc, "Mix:—%");
-
-    // Pump indicator dots
-    const char *dotLabels[] = {"PA", "PB", "MN"};
-    lv_obj_t  **dots[]      = {&dot_pa, &dot_pb, &dot_main};
-    for (int i = 0; i < 3; i++) {
-        lv_obj_t *dot = lv_obj_create(bar);
-        lv_obj_set_size(dot, 10, 10);                                      // ↑ was 8×8
-        lv_obj_set_style_bg_color(dot, C_TEXT3, 0);
-        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_border_width(dot, 0, 0);
-        lv_obj_align(dot, LV_ALIGN_BOTTOM_RIGHT, -2 - i * 28, -4);        // ↑ spacing was 22
-        *dots[i] = dot;
-
-        lv_obj_t *dl = lv_label_create(bar);
-        lv_obj_set_style_text_font(dl, &lv_font_montserrat_14, 0);        // ↑ was 12
-        lv_obj_set_style_text_color(dl, C_TEXT3, 0);
-        lv_obj_align(dl, LV_ALIGN_BOTTOM_RIGHT, -12 - i * 28, -2);
-        lv_label_set_text(dl, dotLabels[i]);
-    }
-
-    // Separator line
-    lv_obj_t *sep = lv_line_create(scr);
-    static lv_point_precise_t pts[2] = {{0, STATUS_BAR_H}, {SCREEN_W, STATUS_BAR_H}};
-    lv_line_set_points(sep, pts, 2);
-    lv_obj_set_style_line_color(sep, C_BORDER, 0);
-    lv_obj_set_style_line_width(sep, 1, 0);
-
-    // ── Log panel ──────────────────────────────────────────────────────────
-    log_panel = lv_obj_create(scr);
-    lv_obj_set_size(log_panel, SCREEN_W, SCREEN_H - LOG_AREA_TOP);
-    lv_obj_align(log_panel, LV_ALIGN_TOP_LEFT, 0, LOG_AREA_TOP);
-    lv_obj_set_style_bg_color(log_panel, C_BG, 0);
-    lv_obj_set_style_bg_opa(log_panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(log_panel, 0, 0);
-    lv_obj_set_style_pad_all(log_panel, 2, 0);
-    lv_obj_clear_flag(log_panel, LV_OBJ_FLAG_SCROLLABLE);
-
-    for (int i = 0; i < MAX_LOG_LINES; i++) {
-        log_labels[i] = lv_label_create(log_panel);
-        lv_obj_set_style_text_font(log_labels[i], &lv_font_montserrat_14, 0);  // ↑ was 12
-        lv_obj_set_style_text_color(log_labels[i], C_TEXT3, 0);
-        lv_obj_set_width(log_labels[i], SCREEN_W - 6);
-        lv_obj_align(log_labels[i], LV_ALIGN_TOP_LEFT, 2, i * LOG_FONT_H);
-        lv_label_set_long_mode(log_labels[i], LV_LABEL_LONG_CLIP);
-        lv_label_set_text(log_labels[i], "");
-    }
+    spr.fillRoundRect(x, y, w, h, r, bg);
+    spr.drawRoundRect(x, y, w, h, r, border);
+    spr.setTextColor(fg, bg);
+    spr.setTextSize(fontSz);
+    spr.setTextDatum(MC_DATUM);
+    spr.drawString(label, x + w/2, y + h/2);
+    spr.setTextDatum(TL_DATUM);
 }
 
-// ─── Circular log buffer ──────────────────────────────────────────────────────
-#define LOG_BUF_SIZE  64
-static String logBuf[LOG_BUF_SIZE];
-static int    logHead  = 0;
-static int    logTotal = 0;
+// Draw pump indicator dot with label below
+void drawPump(int cx, int cy, bool on, bool isMain, const char *lbl) {
+    uint16_t col = on ? (isMain ? C_RED_BR : C_GREEN_BR) : C_SURFACE;
+    uint16_t bcol = on ? (isMain ? C_RED_MID : C_GREEN_MID) : C_BORDER;
+    spr.fillCircle(cx, cy, 6, col);
+    spr.drawCircle(cx, cy, 6, bcol);
+    spr.setTextColor(on ? C_LGREY : C_GREEN_DIM, C_BLACK);
+    spr.setTextSize(1);
+    spr.setTextDatum(MC_DATUM);
+    spr.drawString(lbl, cx, cy + 11);
+    spr.setTextDatum(TL_DATUM);
+}
 
-void refreshLogDisplay()
+// Draw a metric (small label + large value)
+void drawMetric(int x, int y, const char *cap, const String &val,
+                uint16_t valCol, uint8_t valSz = 2)
 {
-    int lines = min(logTotal, MAX_LOG_LINES);
-    int start = (logHead - lines + LOG_BUF_SIZE) % LOG_BUF_SIZE;
+    spr.setTextColor(C_GREEN_DIM, C_BLACK);
+    spr.setTextSize(1);
+    spr.drawString(cap, x, y);
+    spr.setTextColor(valCol, C_BLACK);
+    spr.setTextSize(valSz);
+    spr.drawString(val, x, y + 10);
+}
 
-    for (int i = 0; i < MAX_LOG_LINES; i++) {
-        if (i < lines) {
-            int idx = (start + i) % LOG_BUF_SIZE;
-            const String &txt = logBuf[idx];
+// Full frame render
+void renderFrame() {
+    spr.fillSprite(C_BLACK);  // clears entire framebuffer
 
-            lv_color_t col = C_TEXT2;
-            if      (txt.indexOf("[ERROR]")  >= 0 || txt.indexOf("FAIL")     >= 0 ||
-                     txt.indexOf("severe")   >= 0)                     col = C_RED2;
-            else if (txt.indexOf("[WARN]")   >= 0 || txt.indexOf("moderate") >= 0 ||
-                     txt.indexOf("mild")     >= 0)                     col = C_AMBER2;
-            else if (txt.indexOf("healthy")  >= 0 || txt.indexOf("Spray OFF")>= 0 ||
-                     txt.indexOf("READY")    >= 0)                     col = C_GREEN2;
-            else if (txt.indexOf("Gemini")   >= 0 || txt.indexOf("Disease")  >= 0)
-                                                                        col = C_TEAL;
-            else if (i == lines - 1)                                   col = C_TEXT;
+    // ── Status bar background ────────────────────────────────────────────
+    spr.fillRect(0, 0, W, BAR_H, C_SURFACE);
+    spr.drawRect(0, 0, W, BAR_H, C_BORDER);
 
-            lv_obj_set_style_text_color(log_labels[i], col, 0);
-            lv_label_set_text(log_labels[i], txt.c_str());
-        } else {
-            lv_label_set_text(log_labels[i], "");
+    // ── Left block: disease name ─────────────────────────────────────────
+    spr.setTextColor(C_GREEN_DIM, C_SURFACE);
+    spr.setTextSize(1);
+    spr.drawString("DISEASE DETECTED", 8, 6);
+
+    spr.setTextColor(C_WHITE, C_SURFACE);
+    spr.setTextSize(2);
+    // Clip name to fit — max ~22 chars at size 2 on 340px wide space
+    String dname = sys.disease;
+    if (dname.length() > 22) dname = dname.substring(0, 21) + ".";
+    spr.drawString(dname, 8, 22);
+
+    // ── Left block: sensor row ───────────────────────────────────────────
+    // Size-2 font = 12px wide per char, 16px tall
+    drawMetric(8,   48, "TEMP",    fmtF(sys.temp) + "C",  C_AMBER_BR);
+    drawMetric(108, 48, "HUM",     fmtF(sys.humidity)+"%", C_TEAL);
+    drawMetric(198, 48, "TANK",
+               fmtF(sys.tank) + "%",
+               (sys.tank >= 0 && sys.tank < 15) ? C_RED_BR : C_GREEN_MID);
+    drawMetric(288, 48, "MIX",     fmtF(sys.conc)+"%",    C_GREEN_MID);
+
+    // ── Right block: severity badge ──────────────────────────────────────
+    SevColors sc = pickSev();
+    drawBadge(376, 6, 148, 28, 4,
+              sc.bg, sc.border, sc.text, sevLabel(), 2);
+
+    // ── Right block: uptime ──────────────────────────────────────────────
+    spr.setTextColor(C_GREEN_DIM, C_SURFACE);
+    spr.setTextSize(1);
+    spr.setTextDatum(TR_DATUM);
+    spr.drawString(fmtUptime(uptimeSec), W - 8, 40);
+    spr.setTextDatum(TL_DATUM);
+
+    // ── Right block: pump dots ───────────────────────────────────────────
+    drawPump(396, 56, sys.pump_a,    false, "PA");
+    drawPump(430, 56, sys.pump_b,    false, "PB");
+    drawPump(464, 56, sys.main_pump, true,  "MN");
+
+    // ── Separator line ───────────────────────────────────────────────────
+    spr.drawFastHLine(0, BAR_H, W, C_BORDER);
+
+    // ── Log area ─────────────────────────────────────────────────────────
+    int visible = min(logCount, MAX_LOGS);
+    int startIdx = (logHead - visible + LOG_BUF) % LOG_BUF;
+
+    for (int i = 0; i < MAX_LOGS; i++) {
+        int ly = LOG_Y + i * LOG_LINE_H + 2;
+        if (i < visible) {
+            int idx = (startIdx + i) % LOG_BUF;
+            spr.setTextColor(logRing[idx].color, C_BLACK);
+            spr.setTextSize(1);
+            // Use drawString at larger custom font if available,
+            // or default font — still readable at 536px width
+            spr.setTextFont(2);   // TFT_eSPI font 2 = 16px clean
+            spr.drawString(logRing[idx].text, 6, ly);
         }
     }
+
+    // Dim "TEAM OJAS" watermark at bottom-right (subtle branding)
+    spr.setTextColor(0x0882, C_BLACK);  // nearly invisible on black
+    spr.setTextSize(1);
+    spr.setTextFont(1);
+    spr.setTextDatum(BR_DATUM);
+    spr.drawString("OJAS v3 NIT-H", W - 2, H - 1);
+    spr.setTextDatum(TL_DATUM);
+
+    // ── Push to display ──────────────────────────────────────────────────
+    amoled.pushColors(0, 0, W, H, (uint16_t *)spr.getPointer());
 }
 
-void addLogLine(const String &line)
-{
-    logBuf[logHead] = line;
-    logHead = (logHead + 1) % LOG_BUF_SIZE;
-    if (logTotal < LOG_BUF_SIZE) logTotal++;
-    refreshLogDisplay();
-}
-
-// ─── Status bar refresh ───────────────────────────────────────────────────────
-void refreshStatus()
-{
-    lv_label_set_text(lbl_disease, ("Disease: " + status.disease).c_str());
-
-    lv_label_set_text(lbl_severity, ("[" + status.severity + "]").c_str());
-    lv_obj_set_style_text_color(lbl_severity, severityColor(status.severity), 0);
-
-    lv_label_set_text(lbl_temp,     ("T:"    + fmtFloat(status.temp)     + "°C").c_str());
-    lv_label_set_text(lbl_humidity, ("H:"    + fmtFloat(status.humidity) + "%").c_str());
-    lv_label_set_text(lbl_tank,     ("Tank:" + fmtFloat(status.tank)     + "%").c_str());
-    lv_label_set_text(lbl_conc,     ("Mix:"  + fmtFloat(status.conc)     + "%").c_str());
-
-    lv_obj_set_style_text_color(lbl_tank,
-        (status.tank >= 0 && status.tank < 15) ? C_RED2 : C_TEXT2, 0);
-
-    lv_obj_set_style_bg_color(dot_pa,   status.pump_a    ? C_GREEN : C_TEXT3, 0);
-    lv_obj_set_style_bg_color(dot_pb,   status.pump_b    ? C_GREEN : C_TEXT3, 0);
-    lv_obj_set_style_bg_color(dot_main, status.main_pump ? C_RED   : C_TEXT3, 0);
-}
-
-void refreshTime()
-{
-    uint32_t s = uptime_s;
-    uint32_t h = s / 3600; s %= 3600;
-    uint32_t m = s / 60;   s %= 60;
-    char buf[12];
-    snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu", (unsigned long)h,
-                                                    (unsigned long)m,
-                                                    (unsigned long)s);
-    lv_label_set_text(lbl_time, buf);
-}
-
-// ─── JSON status parser ───────────────────────────────────────────────────────
-bool parseStatusJson(const String &raw)
-{
-    StaticJsonDocument<384> doc;
+// ─── JSON parser ──────────────────────────────────────────────────────────────
+bool parseJson(const String &raw) {
+    StaticJsonDocument<512> doc;
     if (deserializeJson(doc, raw) != DeserializationError::Ok) return false;
     if (!doc.containsKey("lilygo")) return false;
 
-    status.disease   = doc["disease"]   | "—";
-    status.severity  = doc["severity"]  | "none";
-    status.pump_a    = doc["pump_a"]    | 0;
-    status.pump_b    = doc["pump_b"]    | 0;
-    status.main_pump = doc["main_pump"] | 0;
-    status.temp      = doc["temp"]      | -99.0f;
-    status.humidity  = doc["humidity"]  | -99.0f;
-    status.tank      = doc["tank"]      | -99.0f;
-    status.conc      = doc["conc"]      | -99.0f;
+    sys.disease   = doc["disease"]   | "Unknown";
+    sys.severity  = doc["severity"]  | "none";
+    sys.pump_a    = doc["pump_a"]    | 0;
+    sys.pump_b    = doc["pump_b"]    | 0;
+    sys.main_pump = doc["main_pump"] | 0;
+    sys.temp      = doc["temp"]      | -99.0f;
+    sys.humidity  = doc["humidity"]  | -99.0f;
+    sys.tank      = doc["tank"]      | -99.0f;
+    sys.conc      = doc["conc"]      | -99.0f;
     return true;
 }
 
-// ─── Serial input ─────────────────────────────────────────────────────────────
-void checkSerial()
-{
+// ─── Colour picker for log lines ──────────────────────────────────────────────
+uint16_t logColor(const String &line) {
+    if (line.indexOf("[ERROR]")  >= 0 || line.indexOf("FAIL")     >= 0 ||
+        line.indexOf("severe")   >= 0 || line.indexOf("CRITICAL")  >= 0)
+        return C_RED_BR;
+    if (line.indexOf("[WARN]")   >= 0 || line.indexOf("moderate") >= 0 ||
+        line.indexOf("mild")     >= 0)
+        return C_AMBER_BR;
+    if (line.indexOf("READY")    >= 0 || line.indexOf("healthy")  >= 0 ||
+        line.indexOf("Spray OFF")>= 0 || line.indexOf("DONE")     >= 0)
+        return C_GREEN_BR;
+    if (line.indexOf("GEMINI")   >= 0 || line.indexOf("Gemini")   >= 0 ||
+        line.indexOf("[DIAG]")   >= 0)
+        return C_TEAL;
+    if (line.indexOf("[STATUS]") >= 0)
+        return C_GREEN_MID;
+    if (line.startsWith("===") || line.startsWith("▸"))
+        return C_GREEN_BR;
+    return C_GREEN_DIM;
+}
+
+// ─── Serial reader ─────────────────────────────────────────────────────────────
+void checkSerial() {
     while (Serial.available()) {
         char c = (char)Serial.read();
         if (c == '\n' || c == '\r') {
-            serialBuf.trim();
-            if (serialBuf.length() > 0) {
-                if (serialBuf.startsWith("{")) {
-                    if (parseStatusJson(serialBuf)) {
-                        refreshStatus();
-                        addLogLine("[STATUS] " + status.disease
-                                   + " | " + status.severity
-                                   + " | T:" + fmtFloat(status.temp)
-                                   + " H:"   + fmtFloat(status.humidity) + "%");
+            rxBuf.trim();
+            if (rxBuf.length() > 0) {
+                if (rxBuf.startsWith("{")) {
+                    if (parseJson(rxBuf)) {
+                        // Build a compact status log line
+                        String sline = "[STATUS] " + sys.disease
+                            + " | " + sys.severity
+                            + " | T:" + fmtF(sys.temp)
+                            + " H:" + fmtF(sys.humidity) + "%";
+                        pushLog(sline, logColor(sline));
                     } else {
-                        addLogLine(serialBuf);
+                        pushLog(rxBuf, C_AMBER_DIM);
                     }
                 } else {
-                    addLogLine(serialBuf);
+                    pushLog(rxBuf, logColor(rxBuf));
                 }
-                serialBuf = "";
+                rxBuf = "";
+                needsRedraw = true;
             }
         } else {
-            if (serialBuf.length() < 512) serialBuf += c;
+            if (rxBuf.length() < 512) rxBuf += c;
         }
     }
 }
 
 // ─── setup() ──────────────────────────────────────────────────────────────────
-void setup()
-{
-    Serial.begin(LOG_BAUD);
+void setup() {
+    Serial.begin(115200);
 
+    // Init display
     if (!amoled.begin()) {
+        Serial.println("AMOLED init failed");
         while (1) delay(500);
     }
-    amoled.setBrightness(180);
+    amoled.setBrightness(200);
 
-    initLvgl();
-    buildUI();
+    // Create full-screen sprite in PSRAM
+    // 536 × 240 × 2 bytes = 257,280 bytes — fine for 8 MB OPI PSRAM
+    spr.setColorDepth(16);
+    spr.createSprite(W, H);
+    spr.setSwapBytes(true);   // ← KEY: matches RM67162 byte order
 
-    addLogLine("=== Team OJAS · NIT Hamirpur ===");
-    addLogLine("Intelligent Pesticide System");
-    addLogLine("LilyGo AMOLED Log Display READY");
-    addLogLine("Waiting for RPi log stream...");
-    addLogLine("Serial: /dev/ttyUSB1 @ 115200");
+    // Splash: black screen immediately so no garbage visible
+    spr.fillSprite(C_BLACK);
+    amoled.pushColors(0, 0, W, H, (uint16_t *)spr.getPointer());
+
+    // Initial log messages
+    pushLog("▸ Team OJAS  NIT Hamirpur", C_GREEN_BR);
+    pushLog("  Intelligent Pesticide System v3.0", C_GREEN_DIM);
+    pushLog("  TFT_eSPI Sprite Display READY", C_GREEN_BR);
+    pushLog("  Waiting for RPi log stream...", C_GREEN_DIM);
+    pushLog("  /dev/ttyUSB1 @ 115200", C_GREEN_DIM);
+
+    renderFrame();
 }
 
 // ─── loop() ───────────────────────────────────────────────────────────────────
-void loop()
-{
+void loop() {
     checkSerial();
-    lv_timer_handler();
 
+    // Update uptime every second
     static uint32_t lastSec = 0;
     if (millis() - lastSec >= 1000) {
         lastSec = millis();
-        uptime_s++;
-        refreshTime();
+        uptimeSec++;
+        needsRedraw = true;
     }
 
-    delay(5);
+    // Only redraw when something changed — saves power, prevents flicker
+    if (needsRedraw) {
+        renderFrame();
+        needsRedraw = false;
+    }
+
+    delay(10);
 }
