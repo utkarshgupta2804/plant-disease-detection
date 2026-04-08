@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# ML Models (large binary files — store via Git LFS or external storage)
+*.h5
+*.pb
+*.tflite
+*.pt
+*.pth
+*.onnx
+*.pkl
+*.joblib
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Dataset & images (usually large)
+dataset/
+data/
+images/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+
+# Logs
+*.log
+logs/
+
+# Environment variables / secrets
+.env
+*.env
+config.ini
+secrets.yaml
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Raspberry Pi specific
+*.sock
+*.pid

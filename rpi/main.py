@@ -3,15 +3,19 @@
 # Team OJAS · NIT Hamirpur · Dept. of Electrical Engineering
 # Faculty: Dr. Katam Nishanth
 #
+# Device map (all paths are persistent udev symlinks):
+#   /dev/npk      → NPK MAX485 on RPi PL011 UART (/dev/ttyAMA0)
+#   /dev/lilygo   → LilyGo T-Display S3 AMOLED   (USB CDC)
+#   /dev/nodemcu  → NodeMCU ESP32/8266             (USB CH340/CP2102)
+#
 # Execution order each 30-second cycle:
-#   1. Capture plant image (Pi Camera v2 via CSI ribbon)
-#   2. Read sensors (DHT22/GPIO4, NPK/RS485, HC-SR04 US1/GPIO23-24,
-#                   HC-SR04 US2/GPIO25-8)
-#   3. Send image + sensor data to Gemini 1.5 Flash Vision API
-#   4. Parse Gemini response
-#   5. Send commands to NodeMCU via /dev/ttyUSB0 (OLED+LEDs+pumps+relay)
-#   6. Send status packet + log lines to LilyGo AMOLED via /dev/ttyUSB1
-#   7. Append row to /home/pi/pesticide_log.csv  (tailed by website backend)
+#   1. Capture plant image  (Pi Camera v2 via CSI)
+#   2. Read sensors         (DHT22, NPK, US1, US2)
+#   3. Send to Gemini       (image + sensor data)
+#   4. Parse Gemini result
+#   5. Send commands        → NodeMCU (/dev/nodemcu)
+#   6. Send status + logs   → LilyGo  (/dev/lilygo)
+#   7. Append row           → pesticide_log.csv
 # =============================================================================
 
 import csv
@@ -30,6 +34,9 @@ import sensor_dht
 import sensor_npk
 import sensor_ultrasonic
 from config import (
+    LILYGO_PORT,
+    NODEMCU_PORT,
+    NPK_PORT,
     LOG_FILE,
     LOOP_INTERVAL_SECONDS,
     MIN_TANK_LEVEL_PCT,
@@ -40,19 +47,21 @@ from config import (
 logging.basicConfig(
     level   = logging.INFO,
     format  = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers= [
+    handlers = [
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("/home/pi/pesticide_system.log"),
+        logging.FileHandler("pesticide_system.log"),
     ],
 )
 logger = logging.getLogger("main")
 
-# Mirror ALL Python log output to the LilyGo AMOLED display
-lilygo_handler = lilygo_serial.LilyGoHandler()
-lilygo_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
-logging.getLogger().addHandler(lilygo_handler)
+# Attach LilyGo handler AFTER basicConfig so the handler itself can safely
+# call logger.info() internally without recursion.
+# The handler is lazy — it won't open the serial port until the first message.
+_lilygo_handler = lilygo_serial.LilyGoHandler()
+_lilygo_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+logging.getLogger().addHandler(_lilygo_handler)
 
-# ─── CSV schema (must match website backend csv_watcher.py field names) ───────
+# ─── CSV schema ───────────────────────────────────────────────────────────────
 CSV_HEADERS = [
     "timestamp",
     "temperature_c", "humidity_pct",
@@ -102,7 +111,7 @@ def _log_to_csv(sensor_data: dict, gemini_result: dict):
 def _read_all_sensors() -> dict:
     data = {}
 
-    # DHT22 — GPIO4/Pin7, 10kΩ pull-up to 3.3V
+    # DHT22 — GPIO4
     try:
         dht = sensor_dht.read_dht22()
         data.update(dht)
@@ -113,16 +122,17 @@ def _read_all_sensors() -> dict:
         data["temperature"] = None
         data["humidity"]    = None
 
-    # NPK — RS485 via MAX485, GPIO14/15/17, 9600 baud, 12V sensor
+    # NPK — /dev/npk (ttyAMA0 PL011), MAX485 on GPIO14/15/17
     try:
         npk = sensor_npk.read_npk()
         data.update(npk)
-        logger.info("NPK → N:%d P:%d K:%d mg/kg", npk["N"], npk["P"], npk["K"])
+        logger.info("NPK → N:%d P:%d K:%d mg/kg",
+                    npk["N"], npk["P"], npk["K"])
     except RuntimeError as e:
         logger.warning("NPK failed: %s", e)
         data["N"] = data["P"] = data["K"] = None
 
-    # Tank level — HC-SR04 US1, TRIG=GPIO23, ECHO=GPIO24 (via 1k+2k divider)
+    # Tank level — HC-SR04 US1, TRIG=GPIO23, ECHO=GPIO24
     try:
         us1 = sensor_ultrasonic.read_tank_level()
         data["tank_level"] = us1["level_pct"]
@@ -130,21 +140,23 @@ def _read_all_sensors() -> dict:
         if us1["level_pct"] < MIN_TANK_LEVEL_PCT:
             logger.warning("⚠ Tank LOW: %.1f%%", us1["level_pct"])
             nodemcu_serial.update_oled(
-                "TANK LOW!", f"{us1['level_pct']:.0f}% remaining",
+                "TANK LOW!",
+                f"{us1['level_pct']:.0f}% remaining",
                 "Refill soon", "")
             lilygo_serial.log(f"⚠ TANK LOW: {us1['level_pct']:.1f}%", "WARN")
     except RuntimeError as e:
         logger.warning("US1 (tank) failed: %s", e)
         data["tank_level"] = None
 
-    # Mix concentration — HC-SR04 US2, TRIG=GPIO25, ECHO=GPIO8 (via 1k+2k divider)
+    # Mix concentration — HC-SR04 US2, TRIG=GPIO25, ECHO=GPIO8
     try:
         us2 = sensor_ultrasonic.read_concentration()
         data["concentration"] = us2["concentration_pct"]
         logger.info("Concentration → %.1f%%", us2["concentration_pct"])
         if us2["concentration_pct"] < MIN_CONCENTRATION_PCT:
             logger.warning("⚠ Mix conc LOW: %.1f%%", us2["concentration_pct"])
-            lilygo_serial.log(f"⚠ MIX LOW: {us2['concentration_pct']:.1f}%", "WARN")
+            lilygo_serial.log(
+                f"⚠ MIX LOW: {us2['concentration_pct']:.1f}%", "WARN")
     except RuntimeError as e:
         logger.warning("US2 (concentration) failed: %s", e)
         data["concentration"] = None
@@ -159,7 +171,7 @@ _running = True
 
 def _shutdown(signum, frame):
     global _running
-    logger.info("Shutdown signal — cleaning up…")
+    logger.info("Shutdown signal received — finishing current cycle…")
     _running = False
 
 
@@ -173,14 +185,19 @@ def main():
     logger.info("=" * 55)
     logger.info("Intelligent Pesticide Sprinkling System STARTING")
     logger.info("Team OJAS · NIT Hamirpur · Dr. Katam Nishanth")
+    logger.info("Device map:")
+    logger.info("  NPK      → %s  (ttyAMA0 PL011)", NPK_PORT)
+    logger.info("  LilyGo   → %s",                  LILYGO_PORT)
+    logger.info("  NodeMCU  → %s",                  NODEMCU_PORT)
     logger.info("=" * 55)
 
     _ensure_csv()
 
-    # Boot messages to both displays
+    # Boot messages — LilyGo serial opened lazily here on first log() call
     lilygo_serial.log("=== OJAS System BOOT ===")
-    lilygo_serial.log("NodeMCU → /dev/ttyUSB0")
-    lilygo_serial.log("LilyGo  → /dev/ttyUSB1")
+    lilygo_serial.log(f"NPK     → {NPK_PORT}")
+    lilygo_serial.log(f"LilyGo  → {LILYGO_PORT}")
+    lilygo_serial.log(f"NodeMCU → {NODEMCU_PORT}")
 
     nodemcu_serial.update_oled("Team OJAS", "NIT Hamirpur", "System BOOT", "")
     nodemcu_serial.set_led("yellow")
@@ -219,7 +236,7 @@ def main():
                 f"{gemini_result['confidence']*100:.0f}% conf"
             )
         else:
-            logger.warning("No image — skipping Gemini")
+            logger.warning("No image — skipping Gemini analysis")
             lilygo_serial.log("Gemini: SKIPPED (no image)", "WARN")
             gemini_result = {
                 "disease": "unknown", "severity": "none",
@@ -248,7 +265,7 @@ def main():
         # 7. CSV log
         _log_to_csv(sensor_data, gemini_result)
 
-        # Sleep until next cycle
+        # Sleep until next cycle (interruptible)
         elapsed   = time.time() - cycle_start
         sleep_for = max(0, LOOP_INTERVAL_SECONDS - elapsed)
         logger.info("Cycle done %.1fs — sleeping %.1fs", elapsed, sleep_for)
@@ -259,7 +276,7 @@ def main():
                 break
             time.sleep(0.1)
 
-    # Shutdown
+    # ── Shutdown ──────────────────────────────────────────────────────────────
     logger.info("Shutting down…")
     lilygo_serial.log("=== OJAS System SHUTDOWN ===")
     nodemcu_serial.update_oled("System OFF", "Goodbye!", "", "")
