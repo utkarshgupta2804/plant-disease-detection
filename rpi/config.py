@@ -1,87 +1,71 @@
 # =============================================================================
 # config.py — Intelligent Pesticide Sprinkling System
 # Team OJAS · NIT Hamirpur · Dept. of Electrical Engineering
-# Faculty: Dr. Katam Nishanth
 #
-# Pin assignments verified against:
-#   "NodeMCU v3 ESP8266 — Complete Pin-by-Pin Wiring Reference"
-#   Team OJAS · NIT Hamirpur
+# Device paths (after running setup_uart.sh + udev rules):
+#   /dev/npk      → NPK MAX485 on RPi hardware UART (PL011 / ttyAMA0)
+#   /dev/lilygo   → LilyGo T-Display S3 AMOLED      (USB CDC)
+#   /dev/nodemcu  → NodeMCU ESP32/8266               (USB CH340/CP2102)
 # =============================================================================
 
 import os
 from dotenv import load_dotenv
-
 load_dotenv()
 
 # --- Gemini API ---
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
-GEMINI_MODEL   = "gemini-1.5-flash"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDJUoyF3RDWcKCSNz50zVAxuAAF7A2kqQM")
+GEMINI_MODEL   = "gemini-2.0-flash"
 
-# --- Serial (RPi ↔ NodeMCU via USB-A → Micro-USB) ---
-# RPi USB-A port → NodeMCU Micro-USB = /dev/ttyUSB0 @ 115200 baud
-SERIAL_PORT    = os.getenv("SERIAL_PORT", "/dev/ttyUSB0")
-SERIAL_BAUD    = 115200
-SERIAL_TIMEOUT = 2          # seconds read timeout
+# --- Serial: LilyGo T-Display S3 AMOLED ---
+# Persistent symlink created by 99-ojas-devices.rules
+LILYGO_PORT    = "/dev/lilygo"
+LILYGO_BAUD    = 115200
 
-# --- DHT22 (Temperature & Humidity) ---
-# DHT22 Pin 2 (DATA) → RPi GPIO4 / Pin 7
-# DHT22 Pin 1 (VCC)  → RPi Pin 1 (3.3V)
-# DHT22 Pin 4 (GND)  → RPi GND
-# 10 kΩ pull-up between VCC and DATA — mandatory
-DHT22_PIN = 4               # BCM GPIO4 (physical Pin 7)
+# --- Serial: NodeMCU (OLED + LEDs + pumps + relay) ---
+# Persistent symlink created by 99-ojas-devices.rules
+NODEMCU_PORT   = "/dev/nodemcu"
+NODEMCU_BAUD   = 115200
 
-# --- NPK Soil Sensor via MAX485 RS485-to-TTL Converter ---
-# MAX485 DI  (Pin 4) → RPi GPIO14 / Pin 8  (UART TX — Modbus commands out)
-# MAX485 RO  (Pin 1) → RPi GPIO15 / Pin 10 (UART RX — NPK data in)
-# MAX485 DE+RE (Pins 2+3 tied) → RPi GPIO17 / Pin 11 (direction: HIGH=TX, LOW=RX)
-# MAX485 VCC (Pin 8) → RPi 3.3V (Pin 1)
-# MAX485 GND (Pin 5) → RPi GND
-# NPK Brown  (+12V)  → 12V battery +
-# NPK Black  (GND)   → 12V battery –
-# NPK Yellow (A+)    → MAX485 Pin A
-# NPK Blue   (B–)    → MAX485 Pin B
-NPK_PORT      = "/dev/ttyAMA0"   # UART on GPIO14/15
+# --- NPK Soil Sensor via MAX485 on RPi hardware UART ---
+# /dev/npk → /dev/ttyAMA0  (PL011, freed from BT by setup_uart.sh)
+# DO NOT use /dev/ttyS0 — it is the unreliable mini-UART (clock drifts)
+NPK_PORT      = "/dev/npk"
 NPK_BAUD      = 9600
 NPK_SLAVE_ID  = 1
-NPK_DE_RE_PIN = 17               # BCM GPIO17 (Pin 11) — DE+RE direction ctrl
+NPK_DE_RE_PIN = 17               # GPIO17 — controls MAX485 DE+RE together
+
+# --- DHT22 (Temperature & Humidity) ---
+DHT22_PIN = 4
 
 # --- Ultrasonic Sensor 1 (Pesticide Tank Level) ---
-# US1 VCC  → RPi Pin 2 (5V)
-# US1 TRIG → RPi GPIO23 / Pin 16
-# US1 ECHO → 1kΩ → GPIO24 / Pin 18 → 2kΩ → GND  (voltage divider: 5V → ~3.33V)
-# US1 GND  → RPi GND
-US1_TRIG            = 23          # BCM GPIO23 (Pin 16)
-US1_ECHO            = 24          # BCM GPIO24 (Pin 18) — after 1kΩ+2kΩ divider
-US1_MAX_DISTANCE_CM = 30          # physical tank height in cm
-US1_EMPTY_CM        = 28          # sensor reading when tank is empty
-US1_FULL_CM         = 3           # sensor reading when tank is full
+US1_TRIG            = 23
+US1_ECHO            = 24
+US1_MAX_DISTANCE_CM = 30
+US1_EMPTY_CM        = 28
+US1_FULL_CM         = 3
 
 # --- Ultrasonic Sensor 2 (Mix Concentration Level) ---
-# US2 VCC  → RPi Pin 4 (5V)
-# US2 TRIG → RPi GPIO25 / Pin 22
-# US2 ECHO → 1kΩ → GPIO8 / Pin 24 → 2kΩ → GND  (voltage divider: 5V → ~3.33V)
-# US2 GND  → RPi GND
-US2_TRIG            = 25          # BCM GPIO25 (Pin 22)
-US2_ECHO            = 8           # BCM GPIO8  (Pin 24) — after 1kΩ+2kΩ divider
+US2_TRIG            = 25
+US2_ECHO            = 8
 US2_MAX_DISTANCE_CM = 20
 US2_EMPTY_CM        = 18
 US2_FULL_CM         = 2
 
-# --- Pi Camera v2 (CSI ribbon → RPi CSI port) ---
-# Enable: sudo raspi-config → Interface Options → Camera → Enable
-CAMERA_RESOLUTION  = (1920, 1080)
-CAMERA_CAPTURE_PATH = "/tmp/plant_capture.jpg"
+# --- Pi Camera v2 ---
+CAMERA_RESOLUTION   = (1920, 1080)
+CAMERA_CAPTURE_PATH = "plant_capture.jpg"
 
-# --- CSV Log (tailed by the website backend's CSVWatcher) ---
-LOG_FILE = "/home/pi/pesticide_log.csv"
+# --- Logging ---
+LOG_FILE   = "pesticide_log.csv"
+SYSTEM_LOG = "pesticide_system.log"
 
-# --- Main loop timing ---
-LOOP_INTERVAL_SECONDS = 30        # how often the main loop runs
-
-# --- Alert thresholds ---
-MIN_TANK_LEVEL_PCT    = 15        # warn (and alert NodeMCU OLED) below this %
-MIN_CONCENTRATION_PCT = 10        # warn below this %
-
-# --- NodeMCU watchdog ---
-# NodeMCU holds last pump state if no command arrives within 10 seconds
+# --- Timing & Thresholds ---
+LOOP_INTERVAL_SECONDS    = 30
+MIN_TANK_LEVEL_PCT       = 15
+MIN_CONCENTRATION_PCT    = 10
 NODEMCU_WATCHDOG_SECONDS = 10
+
+# Aliases for compatibility with nodemcu_serial.py
+SERIAL_PORT = NODEMCU_PORT
+SERIAL_BAUD = NODEMCU_BAUD
+SERIAL_TIMEOUT = 1  # Add this since it was missing from your config
