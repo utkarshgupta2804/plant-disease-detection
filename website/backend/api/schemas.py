@@ -6,33 +6,37 @@ from pydantic import BaseModel, Field
 
 class SensorReadingOut(BaseModel):
     id: int
-    temperature: Optional[float]
-    humidity: Optional[float]
-    nitrogen: Optional[float]
-    phosphorus: Optional[float]
-    potassium: Optional[float]
-    tank_level_pct: Optional[float]
-    concentration_pct: Optional[float]
-    recorded_at: datetime
-    class Config: from_attributes = True
+    temperature: Optional[float] = None
+    humidity: Optional[float] = None
+    nitrogen: Optional[float] = None
+    phosphorus: Optional[float] = None
+    potassium: Optional[float] = None
+    tank_level_pct: Optional[float] = None
+    concentration_pct: Optional[float] = None
+    recorded_at: Optional[datetime] = None  # FIX: was non-Optional, caused 500 on null
+
+    class Config:
+        from_attributes = True
 
 
 class DiseaseResultOut(BaseModel):
     id: int
     disease: str
-    confidence: Optional[float]
-    severity: Optional[str]
-    treatment: Optional[str]
-    pump_a: Optional[int]
-    pump_b: Optional[int]
-    main_pump: Optional[int]
-    spray_duration_s: Optional[int]
-    notes: Optional[str]
-    image_path: Optional[str]
-    sensor_context: Optional[dict]
-    gemini_error: Optional[str]
-    recorded_at: datetime
-    class Config: from_attributes = True
+    confidence: Optional[float] = None
+    severity: Optional[str] = None
+    treatment: Optional[str] = None
+    pump_a: Optional[int] = None
+    pump_b: Optional[int] = None
+    main_pump: Optional[int] = None
+    spray_duration_s: Optional[int] = None
+    notes: Optional[str] = None
+    image_path: Optional[str] = None
+    sensor_context: Optional[dict] = None
+    gemini_error: Optional[str] = None
+    recorded_at: Optional[datetime] = None  # FIX: was non-Optional, caused 500 on null
+
+    class Config:
+        from_attributes = True
 
 
 class MotorCommandIn(BaseModel):
@@ -46,23 +50,27 @@ class MotorCommandIn(BaseModel):
 class MotorEventOut(BaseModel):
     id: int
     event_type: str
-    trigger: Optional[str]
-    pump_a: Optional[bool]
-    pump_b: Optional[bool]
-    main_pump: Optional[bool]
-    duration_sec: Optional[int]
-    recorded_at: datetime
-    class Config: from_attributes = True
+    trigger: Optional[str] = None
+    pump_a: Optional[bool] = None
+    pump_b: Optional[bool] = None
+    main_pump: Optional[bool] = None
+    duration_sec: Optional[int] = None
+    recorded_at: Optional[datetime] = None  # FIX: was non-Optional, caused 500 on null
+
+    class Config:
+        from_attributes = True
 
 
 class LogOut(BaseModel):
     id: int
     level: str
     message: str
-    source: Optional[str]
-    extra: Optional[Any]
-    created_at: datetime
-    class Config: from_attributes = True
+    source: Optional[str] = None
+    extra: Optional[Any] = None
+    created_at: Optional[datetime] = None  # FIX: was non-Optional, caused 500 on null
+
+    class Config:
+        from_attributes = True
 
 
 class ModeIn(BaseModel):
@@ -71,4 +79,4 @@ class ModeIn(BaseModel):
 
 class ModeOut(BaseModel):
     mode: str
-    updated_at: Optional[datetime]
+    updated_at: Optional[datetime] = None
